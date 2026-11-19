@@ -4714,11 +4714,24 @@ var DEFAULT_SETTINGS = {
   imageFormat: "svg",
   autoZoom100: true,
   methodLinkTemplate: "",
+  callLinkSearch: "",
+  callLinkReplace: "",
   autoRefresh: true,
   lastOpenedPumlPath: "",
   embeddedDefaultView: "diagram",
   embeddedDiagramAlign: "center"
 };
+function applyCallLinks(source, search, replacement) {
+  if (!search || !search.trim()) return source;
+  let pattern;
+  try {
+    pattern = new RegExp(search, "g");
+  } catch (e) {
+    new import_obsidian.Notice(`Call link search is not a valid regex: ${search}`);
+    return source;
+  }
+  return source.split("\n").map((line) => line.includes("[[") ? line : line.replace(pattern, replacement)).join("\n");
+}
 function getDiagramTypeByExtension(extension) {
   const normalized = extension.toLowerCase();
   if (SUPPORTED_PLANTUML_EXTENSIONS.includes(normalized)) return "plantuml";
@@ -5812,7 +5825,7 @@ ${error instanceof Error ? error.message : String(error)}`
         this.statusEl.setText("File is empty.");
         return;
       }
-      const renderSource = diagramType === "plantuml" ? applyMethodLinks(source, this.plugin.settings.methodLinkTemplate) : source;
+      const renderSource = diagramType === "plantuml" ? applyCallLinks(applyMethodLinks(source, this.plugin.settings.methodLinkTemplate), this.plugin.settings.callLinkSearch, this.plugin.settings.callLinkReplace) : source;
       this.statusEl.setText(`Rendering: ${this.currentFile.name}`);
       const renderRoot = this.contentHostEl.createDiv({ cls: "puml-viewer-render-root" });
       const loadingEl = renderRoot.createDiv({ cls: "puml-loading", text: "Generating diagram..." });
@@ -6196,6 +6209,18 @@ var PUMLViewerSettingTab = class extends import_obsidian.PluginSettingTab {
     ).addText(
       (text) => text.setPlaceholder("activity/{class}_{method}.puml").setValue(this.plugin.settings.methodLinkTemplate).onChange(async (value) => {
         this.plugin.settings.methodLinkTemplate = value.trim();
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Call link search (regex)").setDesc("Regular expression matched against each line of PlantUML source when rendering. Example: m_(\\w+)\\.(\\w+)\\(([^()]*)\\)").addText(
+      (text) => text.setPlaceholder("m_(\\w+)\\.(\\w+)\\(([^()]*)\\)").setValue(this.plugin.settings.callLinkSearch).onChange(async (value) => {
+        this.plugin.settings.callLinkSearch = value.trim();
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Call link replacement").setDesc("Replacement text. Use $1, $2 for groups and $& for the whole match. Example: [[$1_$2.puml $&]]").addText(
+      (text) => text.setPlaceholder("[[$1_$2.puml $&]]").setValue(this.plugin.settings.callLinkReplace).onChange(async (value) => {
+        this.plugin.settings.callLinkReplace = value;
         await this.plugin.saveSettings();
       })
     );

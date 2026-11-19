@@ -40,9 +40,7 @@ interface PUMLViewerSettings {
   localServerUrl: string;
   imageFormat: 'svg' | 'png';
   autoZoom100: boolean;
-  methodLinkTemplate: string;
-  callLinkSearch: string;
-  callLinkReplace: string;
+  linkRules: LinkRule[];
   autoRefresh: boolean;
   lastOpenedPumlPath: string;
   embeddedDefaultView: 'diagram' | 'code';
@@ -57,9 +55,7 @@ const DEFAULT_SETTINGS: PUMLViewerSettings = {
   localServerUrl: 'http://localhost:8000',
   imageFormat: 'svg',
   autoZoom100: true,
-  methodLinkTemplate: '',
-  callLinkSearch: '',
-  callLinkReplace: '',
+  linkRules: [],
   autoRefresh: true,
   lastOpenedPumlPath: '',
   embeddedDefaultView: 'diagram',
@@ -128,19 +124,37 @@ function normalizeSvgForResponsiveLayout(svgEl: SVGSVGElement): void {
   }
 }
 
+interface LinkRule {
+  search: string;
+  replace: string;
+  scope: 'line' | 'classMember';
+}
+
 /**
- * Rewrites class methods in PlantUML source to links before rendering.
- * The file itself is not changed. `{class}` and `{method}` in the template
- * are replaced per member, e.g. `activity/{class}_{method}.puml`.
+ * Applies the configured link rules, in order, to PlantUML source before rendering.
+ * The file itself is not changed.
  */
-function applyMethodLinks(source: string, template: string): string {
-  if (!template.trim()) return source;
+function applyLinkRules(source: string, rules: LinkRule[]): string {
+  return rules.reduce((text, rule) => applyLinkRule(text, rule), source);
+}
+
+function applyLinkRule(source: string, rule: LinkRule): string {
+  if (!rule.search.trim()) return source;
+  let pattern: RegExp;
+  try {
+    pattern = new RegExp(rule.search, 'g');
+  } catch {
+    new Notice(`Link rule search is not a valid regex: ${rule.search}`);
+    return source;
+  }
+
   const classHeader = /^\s*(?:abstract\s+)?(?:class|interface|enum)\s+(\w+)[^{]*\{\s*$/;
-  const member = /^(\s*[+\-#~]?\s*)(\w+)\s*(\([^)]*\))(.*)$/;
   let currentClass: string | null = null;
   return source
     .split('\n')
     .map((line) => {
+      if (line.includes('[[')) return line;
+      if (rule.scope === 'line') return line.replace(pattern, rule.replace);
       if (currentClass === null) {
         const header = classHeader.exec(line);
         if (header) currentClass = header[1];
@@ -150,32 +164,8 @@ function applyMethodLinks(source: string, template: string): string {
         currentClass = null;
         return line;
       }
-      if (line.includes('[[')) return line;
-      const match = member.exec(line);
-      if (!match) return line;
-      const [, prefix, method, signature, rest] = match;
-      const target = template.split('{class}').join(currentClass).split('{method}').join(method);
-      return `${prefix}[[${target} ${method}${signature}]]${rest}`;
+      return line.replace(pattern, rule.replace.split('{class}').join(currentClass));
     })
-    .join('\n');
-}
-
-/**
- * Applies a user-configured regex replacement to PlantUML source before rendering.
- * Lines that already contain a link are left unchanged. The file itself is not changed.
- */
-function applyCallLinks(source: string, search: string, replacement: string): string {
-  if (!search.trim()) return source;
-  let pattern: RegExp;
-  try {
-    pattern = new RegExp(search, 'g');
-  } catch {
-    new Notice(`Call link search is not a valid regex: ${search}`);
-    return source;
-  }
-  return source
-    .split('\n')
-    .map((line) => (line.includes('[[') ? line : line.replace(pattern, replacement)))
     .join('\n');
 }
 
@@ -250,6 +240,30 @@ export default class PUMLViewerPlugin extends Plugin {
     const loaded = Object.assign({}, DEFAULT_SETTINGS, await this.loadData()) as PUMLViewerSettings & {
       serverUrl?: string;
     };
+    if (loaded.linkRules === DEFAULT_SETTINGS.linkRules) {
+      loaded.linkRules = [];
+      const legacy = loaded as unknown as Record<string, unknown>;
+      const methodTemplate = typeof legacy.methodLinkTemplate === 'string' ? legacy.methodLinkTemplate.trim() : '';
+      if (methodTemplate) {
+        loaded.linkRules.push({
+          search: '^(\\s*[+\\-#~]?\\s*)(\\w+)\\s*(\\([^)]*\\))',
+          replace: `$1[[${methodTemplate.split('{method}').join('$2')} $2$3]]`,
+          scope: 'classMember',
+        });
+      }
+      const callSearch = typeof legacy.callLinkSearch === 'string' ? legacy.callLinkSearch.trim() : '';
+      if (callSearch) {
+        loaded.linkRules.push({
+          search: callSearch,
+          replace: typeof legacy.callLinkReplace === 'string' ? legacy.callLinkReplace : '',
+          scope: 'line',
+        });
+      }
+    }
+    const legacyKeys = loaded as unknown as Record<string, unknown>;
+    delete legacyKeys.methodLinkTemplate;
+    delete legacyKeys.callLinkSearch;
+    delete legacyKeys.callLinkReplace;
     if (loaded.serverUrl) {
       if (loaded.serverType === 'kroki') {
         loaded.krokiServerUrl = loaded.serverUrl;
@@ -1417,13 +1431,7 @@ class PUMLViewerView extends ItemView {
       }
 
       const renderSource =
-        diagramType === 'plantuml'
-          ? applyCallLinks(
-              applyMethodLinks(source, this.plugin.settings.methodLinkTemplate),
-              this.plugin.settings.callLinkSearch,
-              this.plugin.settings.callLinkReplace,
-            )
-          : source;
+        diagramType === 'plantuml' ? applyLinkRules(source, this.plugin.settings.linkRules) : source;
       this.statusEl.setText(`Rendering: ${this.currentFile.name}`);
       const renderRoot = this.contentHostEl.createDiv({ cls: 'puml-viewer-render-root' });
       const loadingEl = renderRoot.createDiv({ cls: 'puml-loading', text: 'Generating diagram...' });
@@ -1912,40 +1920,61 @@ class PUMLViewerSettingTab extends PluginSettingTab {
         }),
       );
 
-    new Setting(containerEl)
-      .setName('Method link template')
-      .setDesc(
-        'Makes class methods clickable when rendering, without changing the file. Use {class} and {method}, e.g. activity/{class}_{method}.puml. Leave empty to turn it off. Applies on the next render.',
-      )
-      .addText((text) =>
-        text
-          .setPlaceholder('activity/{class}_{method}.puml')
-          .setValue(this.plugin.settings.methodLinkTemplate)
-          .onChange(async (value) => {
-            this.plugin.settings.methodLinkTemplate = value.trim();
-            await this.plugin.saveSettings();
-          }),
-      );
+    containerEl.createEl('h3', { text: 'Link rules' });
+    containerEl.createEl('p', {
+      text: 'Applied in order to PlantUML source before rendering. The file itself is not changed. Line rules run on every line. Class member rules run on members inside class blocks, where {class} is the class name. Lines that already contain a link are skipped.',
+    });
 
-    new Setting(containerEl)
-      .setName('Call link search (regex)')
-      .setDesc('Regular expression matched against each line of PlantUML source when rendering. Example: m_(\\w+)\\.(\\w+)\\(([^()]*)\\)')
-      .addText((text) =>
-        text.setPlaceholder('m_(\\w+)\\.(\\w+)\\(([^()]*)\\)').setValue(this.plugin.settings.callLinkSearch).onChange(async (value) => {
-          this.plugin.settings.callLinkSearch = value.trim();
-          await this.plugin.saveSettings();
-        }),
-      );
+    this.plugin.settings.linkRules.forEach((rule, index) => {
+      new Setting(containerEl)
+        .setName(`Rule ${index + 1}`)
+        .addDropdown((dropdown) =>
+          dropdown
+            .addOption('line', 'Line')
+            .addOption('classMember', 'Class member')
+            .setValue(rule.scope)
+            .onChange(async (value) => {
+              rule.scope = value === 'classMember' ? 'classMember' : 'line';
+              await this.plugin.saveSettings();
+            }),
+        )
+        .addText((text) =>
+          text
+            .setPlaceholder('Search regex')
+            .setValue(rule.search)
+            .onChange(async (value) => {
+              rule.search = value;
+              await this.plugin.saveSettings();
+            }),
+        )
+        .addText((text) =>
+          text
+            .setPlaceholder('Replacement')
+            .setValue(rule.replace)
+            .onChange(async (value) => {
+              rule.replace = value;
+              await this.plugin.saveSettings();
+            }),
+        )
+        .addExtraButton((button) =>
+          button
+            .setIcon('trash')
+            .setTooltip('Remove rule')
+            .onClick(async () => {
+              this.plugin.settings.linkRules.splice(index, 1);
+              await this.plugin.saveSettings();
+              this.display();
+            }),
+        );
+    });
 
-    new Setting(containerEl)
-      .setName('Call link replacement')
-      .setDesc('Replacement text. Use $1, $2 for groups and $& for the whole match. Example: [[$1_$2.puml $&]]')
-      .addText((text) =>
-        text.setPlaceholder('[[$1_$2.puml $&]]').setValue(this.plugin.settings.callLinkReplace).onChange(async (value) => {
-          this.plugin.settings.callLinkReplace = value;
-          await this.plugin.saveSettings();
-        }),
-      );
+    new Setting(containerEl).addButton((button) =>
+      button.setButtonText('Add rule').onClick(async () => {
+        this.plugin.settings.linkRules.push({ search: '', replace: '', scope: 'line' });
+        await this.plugin.saveSettings();
+        this.display();
+      }),
+    );
 
     new Setting(containerEl)
       .setName('Auto refresh')

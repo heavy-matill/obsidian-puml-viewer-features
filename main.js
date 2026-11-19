@@ -4713,25 +4713,12 @@ var DEFAULT_SETTINGS = {
   localServerUrl: "http://localhost:8000",
   imageFormat: "svg",
   autoZoom100: true,
-  methodLinkTemplate: "",
-  callLinkSearch: "",
-  callLinkReplace: "",
+  linkRules: [],
   autoRefresh: true,
   lastOpenedPumlPath: "",
   embeddedDefaultView: "diagram",
   embeddedDiagramAlign: "center"
 };
-function applyCallLinks(source, search, replacement) {
-  if (!search || !search.trim()) return source;
-  let pattern;
-  try {
-    pattern = new RegExp(search, "g");
-  } catch (e) {
-    new import_obsidian.Notice(`Call link search is not a valid regex: ${search}`);
-    return source;
-  }
-  return source.split("\n").map((line) => line.includes("[[") ? line : line.replace(pattern, replacement)).join("\n");
-}
 function getDiagramTypeByExtension(extension) {
   const normalized = extension.toLowerCase();
   if (SUPPORTED_PLANTUML_EXTENSIONS.includes(normalized)) return "plantuml";
@@ -4775,12 +4762,23 @@ function normalizeSvgForResponsiveLayout(svgEl) {
     }
   }
 }
-function applyMethodLinks(source, template) {
-  if (!template.trim()) return source;
+function applyLinkRules(source, rules) {
+  return rules.reduce((text, rule) => applyLinkRule(text, rule), source);
+}
+function applyLinkRule(source, rule) {
+  if (!rule.search.trim()) return source;
+  let pattern;
+  try {
+    pattern = new RegExp(rule.search, "g");
+  } catch {
+    new import_obsidian.Notice(`Link rule search is not a valid regex: ${rule.search}`);
+    return source;
+  }
   const classHeader = /^\s*(?:abstract\s+)?(?:class|interface|enum)\s+(\w+)[^{]*\{\s*$/;
-  const member = /^(\s*[+\-#~]?\s*)(\w+)\s*(\([^)]*\))(.*)$/;
   let currentClass = null;
   return source.split("\n").map((line) => {
+    if (line.includes("[[")) return line;
+    if (rule.scope === "line") return line.replace(pattern, rule.replace);
     if (currentClass === null) {
       const header = classHeader.exec(line);
       if (header) currentClass = header[1];
@@ -4790,12 +4788,7 @@ function applyMethodLinks(source, template) {
       currentClass = null;
       return line;
     }
-    if (line.includes("[[")) return line;
-    const match = member.exec(line);
-    if (!match) return line;
-    const [, prefix, method, signature, rest] = match;
-    const target = template.split("{class}").join(currentClass).split("{method}").join(method);
-    return `${prefix}[[${target} ${method}${signature}]]${rest}`;
+    return line.replace(pattern, rule.replace.split("{class}").join(currentClass));
   }).join("\n");
 }
 function parseSvgMarkup(svgMarkup) {
@@ -4850,6 +4843,30 @@ var PUMLViewerPlugin = class extends import_obsidian.Plugin {
   }
   async loadSettings() {
     const loaded = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    if (loaded.linkRules === DEFAULT_SETTINGS.linkRules) {
+      loaded.linkRules = [];
+      const legacy = loaded;
+      const methodTemplate = typeof legacy.methodLinkTemplate === "string" ? legacy.methodLinkTemplate.trim() : "";
+      if (methodTemplate) {
+        loaded.linkRules.push({
+          search: "^(\\s*[+\\-#~]?\\s*)(\\w+)\\s*(\\([^)]*\\))",
+          replace: `$1[[${methodTemplate.split("{method}").join("$2")} $2$3]]`,
+          scope: "classMember"
+        });
+      }
+      const callSearch = typeof legacy.callLinkSearch === "string" ? legacy.callLinkSearch.trim() : "";
+      if (callSearch) {
+        loaded.linkRules.push({
+          search: callSearch,
+          replace: typeof legacy.callLinkReplace === "string" ? legacy.callLinkReplace : "",
+          scope: "line"
+        });
+      }
+    }
+    const legacyKeys = loaded;
+    delete legacyKeys.methodLinkTemplate;
+    delete legacyKeys.callLinkSearch;
+    delete legacyKeys.callLinkReplace;
     if (loaded.serverUrl) {
       if (loaded.serverType === "kroki") {
         loaded.krokiServerUrl = loaded.serverUrl;
@@ -5825,7 +5842,7 @@ ${error instanceof Error ? error.message : String(error)}`
         this.statusEl.setText("File is empty.");
         return;
       }
-      const renderSource = diagramType === "plantuml" ? applyCallLinks(applyMethodLinks(source, this.plugin.settings.methodLinkTemplate), this.plugin.settings.callLinkSearch, this.plugin.settings.callLinkReplace) : source;
+      const renderSource = diagramType === "plantuml" ? applyLinkRules(source, this.plugin.settings.linkRules) : source;
       this.statusEl.setText(`Rendering: ${this.currentFile.name}`);
       const renderRoot = this.contentHostEl.createDiv({ cls: "puml-viewer-render-root" });
       const loadingEl = renderRoot.createDiv({ cls: "puml-loading", text: "Generating diagram..." });
@@ -6204,24 +6221,39 @@ var PUMLViewerSettingTab = class extends import_obsidian.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Method link template").setDesc(
-      "Makes class methods clickable when rendering, without changing the file. Use {class} and {method}, e.g. activity/{class}_{method}.puml. Leave empty to turn it off. Applies on the next render."
-    ).addText(
-      (text) => text.setPlaceholder("activity/{class}_{method}.puml").setValue(this.plugin.settings.methodLinkTemplate).onChange(async (value) => {
-        this.plugin.settings.methodLinkTemplate = value.trim();
+    containerEl.createEl("h3", { text: "Link rules" });
+    containerEl.createEl("p", {
+      text: "Applied in order to PlantUML source before rendering. The file itself is not changed. Line rules run on every line. Class member rules run on members inside class blocks, where {class} is the class name. Lines that already contain a link are skipped."
+    });
+    this.plugin.settings.linkRules.forEach((rule, index) => {
+      new import_obsidian.Setting(containerEl).setName(`Rule ${index + 1}`).addDropdown(
+        (dropdown) => dropdown.addOption("line", "Line").addOption("classMember", "Class member").setValue(rule.scope).onChange(async (value) => {
+          rule.scope = value === "classMember" ? "classMember" : "line";
+          await this.plugin.saveSettings();
+        })
+      ).addText(
+        (text) => text.setPlaceholder("Search regex").setValue(rule.search).onChange(async (value) => {
+          rule.search = value;
+          await this.plugin.saveSettings();
+        })
+      ).addText(
+        (text) => text.setPlaceholder("Replacement").setValue(rule.replace).onChange(async (value) => {
+          rule.replace = value;
+          await this.plugin.saveSettings();
+        })
+      ).addExtraButton(
+        (button) => button.setIcon("trash").setTooltip("Remove rule").onClick(async () => {
+          this.plugin.settings.linkRules.splice(index, 1);
+          await this.plugin.saveSettings();
+          this.display();
+        })
+      );
+    });
+    new import_obsidian.Setting(containerEl).addButton(
+      (button) => button.setButtonText("Add rule").onClick(async () => {
+        this.plugin.settings.linkRules.push({ search: "", replace: "", scope: "line" });
         await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian.Setting(containerEl).setName("Call link search (regex)").setDesc("Regular expression matched against each line of PlantUML source when rendering. Example: m_(\\w+)\\.(\\w+)\\(([^()]*)\\)").addText(
-      (text) => text.setPlaceholder("m_(\\w+)\\.(\\w+)\\(([^()]*)\\)").setValue(this.plugin.settings.callLinkSearch).onChange(async (value) => {
-        this.plugin.settings.callLinkSearch = value.trim();
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian.Setting(containerEl).setName("Call link replacement").setDesc("Replacement text. Use $1, $2 for groups and $& for the whole match. Example: [[$1_$2.puml $&]]").addText(
-      (text) => text.setPlaceholder("[[$1_$2.puml $&]]").setValue(this.plugin.settings.callLinkReplace).onChange(async (value) => {
-        this.plugin.settings.callLinkReplace = value;
-        await this.plugin.saveSettings();
+        this.display();
       })
     );
     new import_obsidian.Setting(containerEl).setName("Auto refresh").setDesc("Automatically re-render diagram when the source file changes.").addToggle(

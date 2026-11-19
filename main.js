@@ -4713,6 +4713,7 @@ var DEFAULT_SETTINGS = {
   localServerUrl: "http://localhost:8000",
   imageFormat: "svg",
   autoZoom100: true,
+  methodLinkTemplate: "",
   autoRefresh: true,
   lastOpenedPumlPath: "",
   embeddedDefaultView: "diagram",
@@ -4760,6 +4761,29 @@ function normalizeSvgForResponsiveLayout(svgEl) {
       svgEl.removeAttribute("style");
     }
   }
+}
+function applyMethodLinks(source, template) {
+  if (!template.trim()) return source;
+  const classHeader = /^\s*(?:abstract\s+)?(?:class|interface|enum)\s+(\w+)[^{]*\{\s*$/;
+  const member = /^(\s*[+\-#~]?\s*)(\w+)\s*(\([^)]*\))(.*)$/;
+  let currentClass = null;
+  return source.split("\n").map((line) => {
+    if (currentClass === null) {
+      const header = classHeader.exec(line);
+      if (header) currentClass = header[1];
+      return line;
+    }
+    if (line.trim() === "}") {
+      currentClass = null;
+      return line;
+    }
+    if (line.includes("[[")) return line;
+    const match = member.exec(line);
+    if (!match) return line;
+    const [, prefix, method, signature, rest] = match;
+    const target = template.split("{class}").join(currentClass).split("{method}").join(method);
+    return `${prefix}[[${target} ${method}${signature}]]${rest}`;
+  }).join("\n");
 }
 function parseSvgMarkup(svgMarkup) {
   const parsed = new DOMParser().parseFromString(svgMarkup, "image/svg+xml");
@@ -5463,6 +5487,7 @@ var PUMLViewerView = class extends import_obsidian.ItemView {
     this.contentHostEl = this.imageWrapEl.createDiv({ cls: "puml-viewer-content-host" });
     this.bindMainViewPanning();
     this.bindMainViewZoom();
+    this.bindMainViewLinks();
     this.updateToolbarState();
     await this.loadFileFromState();
     this.registerEvent(
@@ -5787,11 +5812,12 @@ ${error instanceof Error ? error.message : String(error)}`
         this.statusEl.setText("File is empty.");
         return;
       }
+      const renderSource = diagramType === "plantuml" ? applyMethodLinks(source, this.plugin.settings.methodLinkTemplate) : source;
       this.statusEl.setText(`Rendering: ${this.currentFile.name}`);
       const renderRoot = this.contentHostEl.createDiv({ cls: "puml-viewer-render-root" });
       const loadingEl = renderRoot.createDiv({ cls: "puml-loading", text: "Generating diagram..." });
       if (this.plugin.settings.imageFormat === "svg") {
-        const response = await this.plugin.requestDiagram(source, "svg", diagramType);
+        const response = await this.plugin.requestDiagram(renderSource, "svg", diagramType);
         if (response.status !== 200) {
           throw new Error(`HTTP ${response.status}`);
         }
@@ -5815,7 +5841,7 @@ ${error instanceof Error ? error.message : String(error)}`
         const img = renderRoot.createEl("img", {
           cls: "puml-viewer-image puml-is-hidden"
         });
-        const objectUrl = await this.plugin.fetchPngObjectUrl(source, diagramType);
+        const objectUrl = await this.plugin.fetchPngObjectUrl(renderSource, diagramType);
         img.src = objectUrl;
         img.alt = `${diagramLabel} diagram`;
         img.addEventListener(
@@ -5963,6 +5989,39 @@ ${error instanceof Error ? error.message : String(error)}`
     const wrap = this.imageWrapEl;
     wrap.scrollLeft = Math.max(0, (wrap.scrollWidth - wrap.clientWidth) / 2);
     wrap.scrollTop = Math.max(0, (wrap.scrollHeight - wrap.clientHeight) / 2);
+  }
+  bindMainViewLinks() {
+    this.registerDomEvent(this.imageWrapEl, "click", (event) => {
+      if (event.button !== 0 || this.mode !== "view") return;
+      const link = event.target?.closest?.("a") ?? null;
+      if (!link) return;
+      const href = link.getAttribute("href") ?? link.getAttributeNS("http://www.w3.org/1999/xlink", "href");
+      if (!href) return;
+      event.preventDefault();
+      event.stopPropagation();
+      void this.openDiagramLink(href);
+    });
+  }
+  async openDiagramLink(rawHref) {
+    const href = rawHref.trim();
+    if (/^https?:\/\//i.test(href)) {
+      window.open(href, "_blank", "noopener");
+      return;
+    }
+    if (!this.currentFile) return;
+    let linkpath = href;
+    try {
+      linkpath = decodeURIComponent(href);
+    } catch {
+      linkpath = href;
+    }
+    linkpath = linkpath.replace(/^\.\//, "").split("#")[0];
+    const target = this.app.metadataCache.getFirstLinkpathDest(linkpath, this.currentFile.path);
+    if (!target) {
+      new import_obsidian.Notice(`Linked file not found: ${linkpath}`);
+      return;
+    }
+    await this.app.workspace.openLinkText(target.path, this.currentFile.path, false);
   }
   bindMainViewPanning() {
     this.registerDomEvent(this.imageWrapEl, "mousedown", (event) => {
@@ -6129,6 +6188,14 @@ var PUMLViewerSettingTab = class extends import_obsidian.PluginSettingTab {
     new import_obsidian.Setting(containerEl).setName("Auto zoom to 100%").setDesc("Open each diagram at 100% and centred. When off, diagrams fit to the pane width.").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.autoZoom100).onChange(async (value) => {
         this.plugin.settings.autoZoom100 = value;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Method link template").setDesc(
+      "Makes class methods clickable when rendering, without changing the file. Use {class} and {method}, e.g. activity/{class}_{method}.puml. Leave empty to turn it off. Applies on the next render."
+    ).addText(
+      (text) => text.setPlaceholder("activity/{class}_{method}.puml").setValue(this.plugin.settings.methodLinkTemplate).onChange(async (value) => {
+        this.plugin.settings.methodLinkTemplate = value.trim();
         await this.plugin.saveSettings();
       })
     );

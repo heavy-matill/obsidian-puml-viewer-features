@@ -99,7 +99,10 @@
 
 .puml-viewer-render-root {
   width: fit-content;
-  margin: auto;
+}
+
+.puml-viewer-render-root a {
+  cursor: pointer;
 }
 
 .puml-viewer-error {

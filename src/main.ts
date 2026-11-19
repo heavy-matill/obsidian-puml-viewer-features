@@ -39,6 +39,7 @@ interface PUMLViewerSettings {
   krokiDiagramType: DiagramType;
   localServerUrl: string;
   imageFormat: 'svg' | 'png';
+  autoZoom100: boolean;
   autoRefresh: boolean;
   lastOpenedPumlPath: string;
   embeddedDefaultView: 'diagram' | 'code';
@@ -52,6 +53,7 @@ const DEFAULT_SETTINGS: PUMLViewerSettings = {
   krokiDiagramType: 'plantuml',
   localServerUrl: 'http://localhost:8000',
   imageFormat: 'svg',
+  autoZoom100: true,
   autoRefresh: true,
   lastOpenedPumlPath: '',
   embeddedDefaultView: 'diagram',
@@ -846,6 +848,8 @@ class PUMLViewerView extends ItemView {
 
   private mode: ViewMode = 'view';
   private zoom = 1;
+  private renderedFilePath: string | null = null;
+  private needsCenter = false;
   private statusEl!: HTMLDivElement;
   private zoomValueEl!: HTMLDivElement;
   private imageWrapEl!: HTMLDivElement;
@@ -1395,6 +1399,7 @@ class PUMLViewerView extends ItemView {
             img.removeClass('puml-is-hidden');
             this.statusEl.setText(`Rendered: ${this.currentFile?.name ?? ''}`);
             URL.revokeObjectURL(objectUrl);
+            requestAnimationFrame(() => this.centerViewIfPending());
           },
           { once: true },
         );
@@ -1411,8 +1416,20 @@ class PUMLViewerView extends ItemView {
         );
       }
 
-      this.fitToWidth();
+      if (this.plugin.settings.autoZoom100) {
+        if (this.renderedFilePath !== this.currentFile.path) {
+          this.renderedFilePath = this.currentFile.path;
+          this.zoom = 1;
+          this.needsCenter = true;
+        }
+        this.applyZoom();
+      } else {
+        this.renderedFilePath = this.currentFile.path;
+        this.fitToWidth();
+      }
+      this.updateZoomLabel();
       this.refreshMainPanAvailability();
+      this.centerViewIfPending();
       if (this.plugin.settings.imageFormat === 'svg') {
         this.statusEl.setText(`Rendered: ${this.currentFile.name}`);
       }
@@ -1530,6 +1547,18 @@ class PUMLViewerView extends ItemView {
       this.imageWrapEl.scrollLeft += newRect.left - (event.clientX - contentX * this.zoom);
       this.imageWrapEl.scrollTop += newRect.top - (event.clientY - contentY * this.zoom);
     });
+  }
+
+  private centerViewIfPending(): void {
+    if (!this.needsCenter || !this.imageWrapEl) return;
+    const imageEl = this.contentHostEl?.querySelector<HTMLImageElement>('.puml-viewer-image');
+    if (imageEl && !(imageEl.naturalWidth > 0)) return;
+    if (!this.contentHostEl?.querySelector('.puml-viewer-render-root')) return;
+
+    this.needsCenter = false;
+    const wrap = this.imageWrapEl;
+    wrap.scrollLeft = Math.max(0, (wrap.scrollWidth - wrap.clientWidth) / 2);
+    wrap.scrollTop = Math.max(0, (wrap.scrollHeight - wrap.clientHeight) / 2);
   }
 
   private bindMainViewPanning(): void {
@@ -1767,6 +1796,16 @@ class PUMLViewerSettingTab extends PluginSettingTab {
             this.plugin.settings.imageFormat = value;
             await this.plugin.saveSettings();
           }),
+      );
+
+    new Setting(containerEl)
+      .setName('Auto zoom to 100%')
+      .setDesc('Open each diagram at 100% and centred. When off, diagrams fit to the pane width.')
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.autoZoom100).onChange(async (value) => {
+          this.plugin.settings.autoZoom100 = value;
+          await this.plugin.saveSettings();
+        }),
       );
 
     new Setting(containerEl)

@@ -4917,7 +4917,7 @@ var PUMLViewerPlugin = class extends import_obsidian.Plugin {
     this.app.workspace.getLeavesOfType(VIEW_TYPE_PUML).forEach((leaf) => leaf.detach());
   }
   /** Opens a link from a diagram click, honouring the modifier keys. Website links open in the browser. */
-  openDiagramVaultLink(rawHref, event, sourcePath) {
+  openDiagramVaultLink(rawHref, event, sourcePath, sourceLeaf) {
     const href = rawHref.trim();
     if (/^https?:\/\//i.test(href)) {
       window.open(href, "_blank", "noopener");
@@ -4936,11 +4936,15 @@ var PUMLViewerPlugin = class extends import_obsidian.Plugin {
       return;
     }
     const mode = linkOpenMode(event, this.settings.linkModifiers);
-    const leaf = this.app.workspace.getLeaf(mode === "same" ? false : mode);
+    const leaf = mode === "same" ? sourceLeaf ?? this.app.workspace.getLeaf(false) : this.app.workspace.getLeaf(mode);
     void leaf.openFile(target);
   }
   /** Routes every link inside a rendered SVG through openDiagramVaultLink. */
-  bindDiagramLinks(svgEl, sourcePath) {
+  /** The open markdown leaf for a note, used so a plain click replaces that note's own tab. */
+  findMarkdownLeaf(sourcePath) {
+    return this.app.workspace.getLeavesOfType("markdown").find((candidate) => candidate.view.file?.path === sourcePath) ?? null;
+  }
+  bindDiagramLinks(svgEl, sourcePath, sourceLeaf) {
     svgEl.addEventListener("click", (event) => {
       const mouseEvent = event;
       if (mouseEvent.button !== 0) return;
@@ -4950,7 +4954,7 @@ var PUMLViewerPlugin = class extends import_obsidian.Plugin {
       if (!href) return;
       mouseEvent.preventDefault();
       mouseEvent.stopPropagation();
-      this.openDiagramVaultLink(href, mouseEvent, sourcePath);
+      this.openDiagramVaultLink(href, mouseEvent, sourcePath, sourceLeaf);
     });
   }
   async loadSettings() {
@@ -5323,7 +5327,7 @@ var PUMLViewerPlugin = class extends import_obsidian.Plugin {
           const svgEl = parseSvgMarkup(response.text);
           if (svgEl) {
             svgEl.addClass("puml-zoom-svg");
-            this.bindDiagramLinks(svgEl, sourcePath);
+            this.bindDiagramLinks(svgEl, sourcePath, this.findMarkdownLeaf(sourcePath));
             let baseSvgWidth = 0;
             try {
               const bbox = svgEl.getBBox();
@@ -5440,7 +5444,7 @@ var PUMLViewerPlugin = class extends import_obsidian.Plugin {
         const svgEl = parseSvgMarkup(response.text);
         if (svgEl) {
           svgEl.addClass("puml-embed-svg");
-          this.bindDiagramLinks(svgEl, sourcePath);
+          this.bindDiagramLinks(svgEl, sourcePath, this.findMarkdownLeaf(sourcePath));
           svgHost.appendChild(svgEl);
         } else {
           throw new Error("Response is not valid SVG content.");
@@ -6155,7 +6159,7 @@ ${error instanceof Error ? error.message : String(error)}`
   }
   openDiagramLink(rawHref, event) {
     if (!this.currentFile) return;
-    this.plugin.openDiagramVaultLink(rawHref, event, this.currentFile.path);
+    this.plugin.openDiagramVaultLink(rawHref, event, this.currentFile.path, this.leaf);
   }
   bindMainViewPanning() {
     this.registerDomEvent(this.imageWrapEl, "mousedown", (event) => {

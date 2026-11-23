@@ -349,7 +349,12 @@ export default class PUMLViewerPlugin extends Plugin {
   }
 
   /** Opens a link from a diagram click, honouring the modifier keys. Website links open in the browser. */
-  openDiagramVaultLink(rawHref: string, event: MouseEvent, sourcePath: string): void {
+  openDiagramVaultLink(
+    rawHref: string,
+    event: MouseEvent,
+    sourcePath: string,
+    sourceLeaf: WorkspaceLeaf | null,
+  ): void {
     const href = rawHref.trim();
     if (/^https?:\/\//i.test(href)) {
       window.open(href, '_blank', 'noopener');
@@ -370,12 +375,25 @@ export default class PUMLViewerPlugin extends Plugin {
       return;
     }
     const mode = linkOpenMode(event, this.settings.linkModifiers);
-    const leaf = this.app.workspace.getLeaf(mode === 'same' ? false : mode);
+    const leaf =
+      mode === 'same'
+        ? (sourceLeaf ?? this.app.workspace.getLeaf(false))
+        : this.app.workspace.getLeaf(mode);
     void leaf.openFile(target);
   }
 
   /** Routes every link inside a rendered SVG through openDiagramVaultLink. */
-  bindDiagramLinks(svgEl: Element, sourcePath: string): void {
+  /** The open markdown leaf for a note, used so a plain click replaces that note's own tab. */
+  findMarkdownLeaf(sourcePath: string): WorkspaceLeaf | null {
+    return (
+      this.app.workspace
+        .getLeavesOfType('markdown')
+        .find((candidate) => (candidate.view as unknown as { file?: { path?: string } }).file?.path === sourcePath) ??
+      null
+    );
+  }
+
+  bindDiagramLinks(svgEl: Element, sourcePath: string, sourceLeaf: WorkspaceLeaf | null): void {
     svgEl.addEventListener('click', (event: Event) => {
       const mouseEvent = event as MouseEvent;
       if (mouseEvent.button !== 0) return;
@@ -385,7 +403,7 @@ export default class PUMLViewerPlugin extends Plugin {
       if (!href) return;
       mouseEvent.preventDefault();
       mouseEvent.stopPropagation();
-      this.openDiagramVaultLink(href, mouseEvent, sourcePath);
+      this.openDiagramVaultLink(href, mouseEvent, sourcePath, sourceLeaf);
     });
   }
 
@@ -830,7 +848,7 @@ export default class PUMLViewerPlugin extends Plugin {
           const svgEl = parseSvgMarkup(response.text);
           if (svgEl) {
             svgEl.addClass('puml-zoom-svg');
-            this.bindDiagramLinks(svgEl, sourcePath);
+            this.bindDiagramLinks(svgEl, sourcePath, this.findMarkdownLeaf(sourcePath));
             let baseSvgWidth = 0;
             try {
               const bbox = svgEl.getBBox();
@@ -953,7 +971,7 @@ export default class PUMLViewerPlugin extends Plugin {
         const svgEl = parseSvgMarkup(response.text);
         if (svgEl) {
           svgEl.addClass('puml-embed-svg');
-          this.bindDiagramLinks(svgEl, sourcePath);
+          this.bindDiagramLinks(svgEl, sourcePath, this.findMarkdownLeaf(sourcePath));
           svgHost.appendChild(svgEl);
         } else {
           throw new Error('Response is not valid SVG content.');
@@ -1818,7 +1836,7 @@ class PUMLViewerView extends ItemView {
 
   private openDiagramLink(rawHref: string, event: MouseEvent): void {
     if (!this.currentFile) return;
-    this.plugin.openDiagramVaultLink(rawHref, event, this.currentFile.path);
+    this.plugin.openDiagramVaultLink(rawHref, event, this.currentFile.path, this.leaf);
   }
 
   private bindMainViewPanning(): void {

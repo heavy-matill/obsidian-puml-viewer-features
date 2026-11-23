@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "node esbuild.config.mjs production",
+    "copy:obsidian": "node -e \"const fs=require('fs'); const target='C:/Users/K582442/_Daten/branches/Test_X18_CodeFlow/.obsidian/plugins/puml-viewer'; fs.mkdirSync(target,{recursive:true}); for (const file of ['main.js','styles.css','manifest.json']) fs.copyFileSync(file, target+'/'+file);\"",
     "lint": "eslint . --max-warnings=0",
     "lint:fix": "eslint . --fix"
   },

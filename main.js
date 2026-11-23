@@ -4716,6 +4716,7 @@ var DEFAULT_SETTINGS = {
   linkRules: [],
   headerLinkRules: [],
   linkModifiers: { tab: "ctrl", split: "shift", window: "alt" },
+  invertInDarkMode: true,
   autoRefresh: true,
   lastOpenedPumlPath: "",
   embeddedDefaultView: "diagram",
@@ -4877,9 +4878,18 @@ function parseSvgMarkup(svgMarkup) {
   normalizeSvgForResponsiveLayout(normalized);
   return normalized;
 }
+var DIAGRAM_SELECTOR = ".puml-viewer-render-root svg, .puml-viewer-render-root img, .puml-embed-diagram svg, .puml-embed-diagram img, .puml-zoom-svg, .puml-zoom-image";
+var DARK_FILTER = "invert(0.85) hue-rotate(180deg)";
 var PUMLViewerPlugin = class extends import_obsidian.Plugin {
+  constructor() {
+    super(...arguments);
+    this.diagramObserver = null;
+  }
   async onload() {
     await this.loadSettings();
+    this.watchDiagramInsertions();
+    this.applyDiagramInversion();
+    this.registerEvent(this.app.workspace.on("css-change", () => this.applyDiagramInversion()));
     this.registerView(VIEW_TYPE_PUML, (leaf) => new PUMLViewerView(leaf, this));
     this.registerExtensions([...SUPPORTED_DIAGRAM_EXTENSIONS], VIEW_TYPE_PUML);
     this.addCommand({
@@ -4914,7 +4924,38 @@ var PUMLViewerPlugin = class extends import_obsidian.Plugin {
     this.addSettingTab(new PUMLViewerSettingTab(this.app, this));
   }
   onunload() {
+    this.diagramObserver?.disconnect();
+    this.diagramObserver = null;
     this.app.workspace.getLeavesOfType(VIEW_TYPE_PUML).forEach((leaf) => leaf.detach());
+  }
+  /** True when Obsidian uses its dark theme. App.isDarkMode exists from 1.10.0; older versions use the body class. */
+  isDarkMode() {
+    const app = this.app;
+    if (typeof app.isDarkMode === "function") return app.isDarkMode();
+    return window.activeDocument.body.classList.contains("theme-dark");
+  }
+  /** Sets or clears the dark filter on one diagram element, from the setting and the theme. */
+  invertDiagramElement(el) {
+    const invert = this.settings.invertInDarkMode && this.isDarkMode();
+    el.style.filter = invert ? DARK_FILTER : "";
+  }
+  /** Re-applies the dark filter to every diagram element on the page. */
+  applyDiagramInversion() {
+    window.activeDocument.querySelectorAll(DIAGRAM_SELECTOR).forEach((el) => this.invertDiagramElement(el));
+  }
+  /** Applies the filter to diagram elements as they are inserted, so every render path is covered. */
+  watchDiagramInsertions() {
+    this.diagramObserver = new MutationObserver((records) => {
+      for (const record of records) {
+        record.addedNodes.forEach((node) => {
+          if (node.nodeType !== Node.ELEMENT_NODE) return;
+          const el = node;
+          if (el.matches(DIAGRAM_SELECTOR)) this.invertDiagramElement(el);
+          el.querySelectorAll(DIAGRAM_SELECTOR).forEach((child) => this.invertDiagramElement(child));
+        });
+      }
+    });
+    this.diagramObserver.observe(window.activeDocument.body, { childList: true, subtree: true });
   }
   /** Opens a link from a diagram click, honouring the modifier keys. Website links open in the browser. */
   openDiagramVaultLink(rawHref, event, sourcePath, sourceLeaf) {
@@ -6038,6 +6079,10 @@ ${error instanceof Error ? error.message : String(error)}`
       }
       this.updateZoomLabel();
       this.refreshMainPanAvailability();
+      const darkActive = this.plugin.settings.invertInDarkMode && this.plugin.isDarkMode();
+      for (const el of [this.imageWrapEl, this.contentHostEl, this.contentEl]) {
+        if (el) el.style.background = darkActive ? "var(--background-primary)" : "";
+      }
       this.centerViewIfPending();
       if (this.plugin.settings.imageFormat === "svg") {
         this.statusEl.setText(`Rendered: ${this.currentFile.name}`);
@@ -6331,6 +6376,13 @@ var PUMLViewerSettingTab = class extends import_obsidian.PluginSettingTab {
       (toggle) => toggle.setValue(this.plugin.settings.autoZoom100).onChange(async (value) => {
         this.plugin.settings.autoZoom100 = value;
         await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Invert diagrams in dark mode").setDesc("Shows diagrams with a dark background and light lines when Obsidian uses its dark theme. Colours keep their hue.").addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.invertInDarkMode).onChange(async (value) => {
+        this.plugin.settings.invertInDarkMode = value;
+        await this.plugin.saveSettings();
+        this.plugin.applyDiagramInversion();
       })
     );
     containerEl.createEl("h3", { text: "Link click behaviour" });

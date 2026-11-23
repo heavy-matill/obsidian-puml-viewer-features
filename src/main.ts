@@ -1095,6 +1095,8 @@ class PUMLViewerView extends ItemView {
   plugin: PUMLViewerPlugin;
   currentFile: TFile | null = null;
 
+  // Obsidian shows the tab's back and forward arrows only for navigable views (View.navigation).
+  navigation = true;
   private mode: ViewMode = 'view';
   private zoom = 1;
   private renderedFilePath: string | null = null;
@@ -1257,6 +1259,8 @@ class PUMLViewerView extends ItemView {
 
     const file = this.app.vault.getAbstractFileByPath(viewState.file);
     if (file instanceof TFile) {
+      // A change of file is a navigation step; Obsidian records it for the tab's back and forward arrows.
+      if (this.currentFile?.path !== file.path) result.history = true;
       this.currentFile = file;
       void this.plugin.rememberLastPuml(file.path);
       this.resetDraftIfFileChanged();

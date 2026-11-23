@@ -5549,6 +5549,8 @@ var PUMLViewerView = class extends import_obsidian.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.currentFile = null;
+    // Obsidian shows the tab's back and forward arrows only for navigable views (View.navigation).
+    this.navigation = true;
     this.mode = "view";
     this.zoom = 1;
     this.renderedFilePath = null;
@@ -5668,6 +5670,7 @@ var PUMLViewerView = class extends import_obsidian.ItemView {
     if (!viewState.file) return;
     const file = this.app.vault.getAbstractFileByPath(viewState.file);
     if (file instanceof import_obsidian.TFile) {
+      if (this.currentFile?.path !== file.path) result.history = true;
       this.currentFile = file;
       void this.plugin.rememberLastPuml(file.path);
       this.resetDraftIfFileChanged();

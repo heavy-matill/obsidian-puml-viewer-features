@@ -41,6 +41,8 @@ interface PUMLViewerSettings {
   imageFormat: 'svg' | 'png';
   autoZoom100: boolean;
   linkRules: LinkRule[];
+  headerLinkRules: HeaderLinkRule[];
+  linkModifiers: LinkModifierSettings;
   autoRefresh: boolean;
   lastOpenedPumlPath: string;
   embeddedDefaultView: 'diagram' | 'code';
@@ -56,6 +58,8 @@ const DEFAULT_SETTINGS: PUMLViewerSettings = {
   imageFormat: 'svg',
   autoZoom100: true,
   linkRules: [],
+  headerLinkRules: [],
+  linkModifiers: { tab: 'ctrl', split: 'shift', window: 'alt' },
   autoRefresh: true,
   lastOpenedPumlPath: '',
   embeddedDefaultView: 'diagram',
@@ -169,6 +173,91 @@ function applyLinkRule(source: string, rule: LinkRule): string {
     .join('\n');
 }
 
+interface HeaderLinkRule {
+  pathMatch: string;
+  targetPath: string;
+  label: string;
+}
+
+type ModifierKey = 'none' | 'ctrl' | 'meta' | 'alt' | 'shift';
+type LinkOpenMode = 'same' | 'tab' | 'split' | 'window';
+interface LinkModifierSettings {
+  tab: ModifierKey;
+  split: ModifierKey;
+  window: ModifierKey;
+}
+
+function fillTemplate(template: string, groups: Record<string, string>): string {
+  return template.replace(/\{(\w+)\}/g, (_full, key: string) => groups[key] ?? '');
+}
+
+/**
+ * Adds a header block with one link per matching rule, placed after @startuml.
+ * pathMatch is tested against the vault path of the open file. Its named groups fill
+ * {name} placeholders in targetPath and label; {name} falls back to the file stem.
+ * A rule never links to the file that is open, a target is linked once, and a target is
+ * linked only if exists() reports it in the vault.
+ * The file itself is not changed.
+ */
+function applyHeaderLinkRules(
+  source: string,
+  filePath: string,
+  rules: HeaderLinkRule[],
+  exists: (path: string) => boolean,
+): string {
+  const fileName = filePath.split('/').pop() ?? filePath;
+  const stem = fileName.replace(/\.[^.]+$/, '');
+  const links: string[] = [];
+  const seen = new Set<string>();
+  for (const rule of rules) {
+    if (!rule.pathMatch.trim() || !rule.targetPath.trim()) continue;
+    let match: RegExpExecArray | null;
+    try {
+      match = new RegExp(rule.pathMatch).exec(filePath);
+    } catch {
+      new Notice(`Header link path check is not a valid regex: ${rule.pathMatch}`);
+      continue;
+    }
+    if (!match) continue;
+    const groups: Record<string, string> = { name: stem };
+    for (const [key, value] of Object.entries(match.groups ?? {})) groups[key] = value ?? '';
+    const target = fillTemplate(rule.targetPath, groups).trim();
+    if (target === filePath || seen.has(target)) continue;
+    if (!exists(target)) continue;
+    seen.add(target);
+    const label = fillTemplate(rule.label, groups).replace(/[[\]]/g, '').trim() || target;
+    links.push(`[[${encodeURI(target)} ${label}]]`);
+  }
+  if (links.length === 0) return source;
+  const lines = source.split('\n');
+  const startIdx = lines.findIndex((line) => /^\s*@startuml\b/.test(line));
+  if (startIdx < 0) return source;
+  const block = ['center header', links.join(' | '), 'endheader'];
+  return [...lines.slice(0, startIdx + 1), ...block, ...lines.slice(startIdx + 1)].join('\n');
+}
+
+/** Maps a click to the way a vault link opens. Split wins, then window, then tab. */
+function linkOpenMode(event: MouseEvent, mods: LinkModifierSettings): LinkOpenMode {
+  const pressed = (key: ModifierKey): boolean => {
+    switch (key) {
+      case 'ctrl':
+        return event.ctrlKey;
+      case 'meta':
+        return event.metaKey;
+      case 'alt':
+        return event.altKey;
+      case 'shift':
+        return event.shiftKey;
+      default:
+        return false;
+    }
+  };
+  if (pressed(mods.split)) return 'split';
+  if (pressed(mods.window)) return 'window';
+  if (pressed(mods.tab)) return 'tab';
+  return 'same';
+}
+
 function parseSvgMarkup(svgMarkup: string): SVGSVGElement | null {
   const parsed = new DOMParser().parseFromString(svgMarkup, 'image/svg+xml');
   if (parsed.querySelector('parsererror')) return null;
@@ -225,7 +314,7 @@ export default class PUMLViewerPlugin extends Plugin {
           source,
           lang,
         );
-        await this.renderEmbeddedDiagramBlock(source, el, fenceWidthHintPx, lang);
+        await this.renderEmbeddedDiagramBlock(source, el, fenceWidthHintPx, lang, ctx.sourcePath);
       });
     }
 
@@ -234,6 +323,44 @@ export default class PUMLViewerPlugin extends Plugin {
 
   onunload(): void {
     this.app.workspace.getLeavesOfType(VIEW_TYPE_PUML).forEach((leaf) => leaf.detach());
+  }
+
+  /** Opens a link from a diagram click, honouring the modifier keys. Website links open in the browser. */
+  openDiagramVaultLink(rawHref: string, event: MouseEvent, sourcePath: string): void {
+    const href = rawHref.trim();
+    if (/^https?:\/\//i.test(href)) {
+      window.open(href, '_blank', 'noopener');
+      return;
+    }
+    let linkpath = href;
+    try {
+      linkpath = decodeURIComponent(href);
+    } catch {
+      linkpath = href;
+    }
+    linkpath = linkpath.replace(/^\.\//, '').split('#')[0];
+    const target = this.app.metadataCache.getFirstLinkpathDest(linkpath, sourcePath);
+    if (!target) {
+      new Notice(`Linked file not found: ${linkpath}`);
+      return;
+    }
+    const mode = linkOpenMode(event, this.settings.linkModifiers);
+    void this.app.workspace.openLinkText(target.path, sourcePath, mode === 'same' ? false : mode);
+  }
+
+  /** Routes every link inside a rendered SVG through openDiagramVaultLink. */
+  bindDiagramLinks(svgEl: Element, sourcePath: string): void {
+    svgEl.addEventListener('click', (event: Event) => {
+      const mouseEvent = event as MouseEvent;
+      if (mouseEvent.button !== 0) return;
+      const link = (mouseEvent.target as Element | null)?.closest?.('a') ?? null;
+      if (!link) return;
+      const href = link.getAttribute('href') ?? link.getAttributeNS('http://www.w3.org/1999/xlink', 'href');
+      if (!href) return;
+      mouseEvent.preventDefault();
+      mouseEvent.stopPropagation();
+      this.openDiagramVaultLink(href, mouseEvent, sourcePath);
+    });
   }
 
   async loadSettings(): Promise<void> {
@@ -260,6 +387,10 @@ export default class PUMLViewerPlugin extends Plugin {
         });
       }
     }
+    loaded.headerLinkRules = Array.isArray(loaded.headerLinkRules)
+      ? loaded.headerLinkRules.map((rule) => ({ ...rule }))
+      : [];
+    loaded.linkModifiers = { ...DEFAULT_SETTINGS.linkModifiers, ...(loaded.linkModifiers ?? {}) };
     const legacyKeys = loaded as unknown as Record<string, unknown>;
     delete legacyKeys.methodLinkTemplate;
     delete legacyKeys.callLinkSearch;
@@ -452,6 +583,7 @@ export default class PUMLViewerPlugin extends Plugin {
     el: HTMLElement,
     fenceWidthHintPx: number | null,
     diagramType: DiagramType,
+    sourcePath: string,
   ): Promise<void> {
     const diagramLabel = diagramType === 'mermaid' ? 'Mermaid' : 'PlantUML';
     const { renderSource, widthHintPx } = this.extractEmbeddedWidthHint(source, fenceWidthHintPx);
@@ -672,6 +804,7 @@ export default class PUMLViewerPlugin extends Plugin {
           const svgEl = parseSvgMarkup(response.text);
           if (svgEl) {
             svgEl.addClass('puml-zoom-svg');
+            this.bindDiagramLinks(svgEl, sourcePath);
             let baseSvgWidth = 0;
             try {
               const bbox = svgEl.getBBox();
@@ -794,6 +927,7 @@ export default class PUMLViewerPlugin extends Plugin {
         const svgEl = parseSvgMarkup(response.text);
         if (svgEl) {
           svgEl.addClass('puml-embed-svg');
+          this.bindDiagramLinks(svgEl, sourcePath);
           svgHost.appendChild(svgEl);
         } else {
           throw new Error('Response is not valid SVG content.');
@@ -1431,7 +1565,14 @@ class PUMLViewerView extends ItemView {
       }
 
       const renderSource =
-        diagramType === 'plantuml' ? applyLinkRules(source, this.plugin.settings.linkRules) : source;
+        diagramType === 'plantuml'
+          ? applyHeaderLinkRules(
+              applyLinkRules(source, this.plugin.settings.linkRules),
+              this.currentFile.path,
+              this.plugin.settings.headerLinkRules,
+              (path) => this.app.vault.getAbstractFileByPath(path) !== null,
+            )
+          : source;
       this.statusEl.setText(`Rendering: ${this.currentFile.name}`);
       const renderRoot = this.contentHostEl.createDiv({ cls: 'puml-viewer-render-root' });
       const loadingEl = renderRoot.createDiv({ cls: 'puml-loading', text: 'Generating diagram...' });
@@ -1645,32 +1786,13 @@ class PUMLViewerView extends ItemView {
       if (!href) return;
       event.preventDefault();
       event.stopPropagation();
-      void this.openDiagramLink(href);
+      this.openDiagramLink(href, event);
     });
   }
 
-  private async openDiagramLink(rawHref: string): Promise<void> {
-    const href = rawHref.trim();
-    if (/^https?:\/\//i.test(href)) {
-      window.open(href, '_blank', 'noopener');
-      return;
-    }
+  private openDiagramLink(rawHref: string, event: MouseEvent): void {
     if (!this.currentFile) return;
-
-    let linkpath = href;
-    try {
-      linkpath = decodeURIComponent(href);
-    } catch {
-      linkpath = href;
-    }
-    linkpath = linkpath.replace(/^\.\//, '').split('#')[0];
-
-    const target = this.app.metadataCache.getFirstLinkpathDest(linkpath, this.currentFile.path);
-    if (!target) {
-      new Notice(`Linked file not found: ${linkpath}`);
-      return;
-    }
-    await this.app.workspace.openLinkText(target.path, this.currentFile.path, false);
+    this.plugin.openDiagramVaultLink(rawHref, event, this.currentFile.path);
   }
 
   private bindMainViewPanning(): void {
@@ -1971,6 +2093,87 @@ class PUMLViewerSettingTab extends PluginSettingTab {
     new Setting(containerEl).addButton((button) =>
       button.setButtonText('Add rule').onClick(async () => {
         this.plugin.settings.linkRules.push({ search: '', replace: '', scope: 'line' });
+        await this.plugin.saveSettings();
+        this.display();
+      }),
+    );
+
+    containerEl.createEl('h3', { text: 'Link click behaviour' });
+    containerEl.createEl('p', {
+      text: 'Plain click opens a link in the same tab. Hold the chosen key while clicking to open it in a new tab, a split, or a new window. Applies to every link in the viewer. Set a key to None to disable it.',
+    });
+    const modifierOptions: Record<ModifierKey, string> = {
+      none: 'None',
+      ctrl: 'Ctrl',
+      meta: 'Meta (Cmd on macOS)',
+      alt: 'Alt',
+      shift: 'Shift',
+    };
+    const modifierSetting = (name: string, key: 'tab' | 'split' | 'window'): void => {
+      new Setting(containerEl)
+        .setName(name)
+        .addDropdown((dropdown) => {
+          for (const [value, label] of Object.entries(modifierOptions)) dropdown.addOption(value, label);
+          dropdown.setValue(this.plugin.settings.linkModifiers[key]).onChange(async (value) => {
+            this.plugin.settings.linkModifiers[key] = value as ModifierKey;
+            await this.plugin.saveSettings();
+          });
+        });
+    };
+    modifierSetting('Key for new tab', 'tab');
+    modifierSetting('Key for split view', 'split');
+    modifierSetting('Key for new window', 'window');
+
+    containerEl.createEl('h3', { text: 'Header link rules' });
+    containerEl.createEl('p', {
+      text: 'Adds a header with links to the open PlantUML file before rendering. The file itself is not changed. The path check is a regex on the vault path; its named groups (for example comp, prefix) fill {name} placeholders in the target path and label. A rule never links to the open file, and a link is added only if its target exists in the vault.',
+    });
+
+    this.plugin.settings.headerLinkRules.forEach((rule, index) => {
+      new Setting(containerEl)
+        .setName(`Header rule ${index + 1}`)
+        .addText((text) =>
+          text
+            .setPlaceholder('Path check regex')
+            .setValue(rule.pathMatch)
+            .onChange(async (value) => {
+              rule.pathMatch = value;
+              await this.plugin.saveSettings();
+            }),
+        )
+        .addText((text) =>
+          text
+            .setPlaceholder('Target path, e.g. {prefix}activity/{comp}_Run.puml')
+            .setValue(rule.targetPath)
+            .onChange(async (value) => {
+              rule.targetPath = value;
+              await this.plugin.saveSettings();
+            }),
+        )
+        .addText((text) =>
+          text
+            .setPlaceholder('Label, e.g. {comp}_Run')
+            .setValue(rule.label)
+            .onChange(async (value) => {
+              rule.label = value;
+              await this.plugin.saveSettings();
+            }),
+        )
+        .addExtraButton((button) =>
+          button
+            .setIcon('trash')
+            .setTooltip('Remove header rule')
+            .onClick(async () => {
+              this.plugin.settings.headerLinkRules.splice(index, 1);
+              await this.plugin.saveSettings();
+              this.display();
+            }),
+        );
+    });
+
+    new Setting(containerEl).addButton((button) =>
+      button.setButtonText('Add header rule').onClick(async () => {
+        this.plugin.settings.headerLinkRules.push({ pathMatch: '', targetPath: '', label: '' });
         await this.plugin.saveSettings();
         this.display();
       }),

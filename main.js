@@ -4714,6 +4714,8 @@ var DEFAULT_SETTINGS = {
   imageFormat: "svg",
   autoZoom100: true,
   linkRules: [],
+  headerLinkRules: [],
+  linkModifiers: { tab: "ctrl", split: "shift", window: "alt" },
   autoRefresh: true,
   lastOpenedPumlPath: "",
   embeddedDefaultView: "diagram",
@@ -4791,6 +4793,60 @@ function applyLinkRule(source, rule) {
     return line.replace(pattern, rule.replace.split("{class}").join(currentClass));
   }).join("\n");
 }
+function fillTemplate(template, groups) {
+  return template.replace(/\{(\w+)\}/g, (_full, key) => groups[key] ?? "");
+}
+function applyHeaderLinkRules(source, filePath, rules, exists) {
+  const fileName = filePath.split("/").pop() ?? filePath;
+  const stem = fileName.replace(/\.[^.]+$/, "");
+  const links = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const rule of rules) {
+    if (!rule.pathMatch.trim() || !rule.targetPath.trim()) continue;
+    let match;
+    try {
+      match = new RegExp(rule.pathMatch).exec(filePath);
+    } catch {
+      new import_obsidian.Notice(`Header link path check is not a valid regex: ${rule.pathMatch}`);
+      continue;
+    }
+    if (!match) continue;
+    const groups = { name: stem };
+    for (const [key, value] of Object.entries(match.groups ?? {})) groups[key] = value ?? "";
+    const target = fillTemplate(rule.targetPath, groups).trim();
+    if (target === filePath || seen.has(target)) continue;
+    if (!exists(target)) continue;
+    seen.add(target);
+    const label = fillTemplate(rule.label, groups).replace(/[[\]]/g, "").trim() || target;
+    links.push(`[[${encodeURI(target)} ${label}]]`);
+  }
+  if (links.length === 0) return source;
+  const lines = source.split("\n");
+  const startIdx = lines.findIndex((line) => /^\s*@startuml\b/.test(line));
+  if (startIdx < 0) return source;
+  const block = ["center header", links.join(" | "), "endheader"];
+  return [...lines.slice(0, startIdx + 1), ...block, ...lines.slice(startIdx + 1)].join("\n");
+}
+function linkOpenMode(event, mods) {
+  const pressed = (key) => {
+    switch (key) {
+      case "ctrl":
+        return event.ctrlKey;
+      case "meta":
+        return event.metaKey;
+      case "alt":
+        return event.altKey;
+      case "shift":
+        return event.shiftKey;
+      default:
+        return false;
+    }
+  };
+  if (pressed(mods.split)) return "split";
+  if (pressed(mods.window)) return "window";
+  if (pressed(mods.tab)) return "tab";
+  return "same";
+}
 function parseSvgMarkup(svgMarkup) {
   const parsed = new DOMParser().parseFromString(svgMarkup, "image/svg+xml");
   if (parsed.querySelector("parsererror")) return null;
@@ -4833,13 +4889,49 @@ var PUMLViewerPlugin = class extends import_obsidian.Plugin {
           source,
           lang
         );
-        await this.renderEmbeddedDiagramBlock(source, el, fenceWidthHintPx, lang);
+        await this.renderEmbeddedDiagramBlock(source, el, fenceWidthHintPx, lang, ctx.sourcePath);
       });
     }
     this.addSettingTab(new PUMLViewerSettingTab(this.app, this));
   }
   onunload() {
     this.app.workspace.getLeavesOfType(VIEW_TYPE_PUML).forEach((leaf) => leaf.detach());
+  }
+  /** Opens a link from a diagram click, honouring the modifier keys. Website links open in the browser. */
+  openDiagramVaultLink(rawHref, event, sourcePath) {
+    const href = rawHref.trim();
+    if (/^https?:\/\//i.test(href)) {
+      window.open(href, "_blank", "noopener");
+      return;
+    }
+    let linkpath = href;
+    try {
+      linkpath = decodeURIComponent(href);
+    } catch {
+      linkpath = href;
+    }
+    linkpath = linkpath.replace(/^\.\//, "").split("#")[0];
+    const target = this.app.metadataCache.getFirstLinkpathDest(linkpath, sourcePath);
+    if (!target) {
+      new import_obsidian.Notice(`Linked file not found: ${linkpath}`);
+      return;
+    }
+    const mode = linkOpenMode(event, this.settings.linkModifiers);
+    void this.app.workspace.openLinkText(target.path, sourcePath, mode === "same" ? false : mode);
+  }
+  /** Routes every link inside a rendered SVG through openDiagramVaultLink. */
+  bindDiagramLinks(svgEl, sourcePath) {
+    svgEl.addEventListener("click", (event) => {
+      const mouseEvent = event;
+      if (mouseEvent.button !== 0) return;
+      const link = mouseEvent.target?.closest?.("a") ?? null;
+      if (!link) return;
+      const href = link.getAttribute("href") ?? link.getAttributeNS("http://www.w3.org/1999/xlink", "href");
+      if (!href) return;
+      mouseEvent.preventDefault();
+      mouseEvent.stopPropagation();
+      this.openDiagramVaultLink(href, mouseEvent, sourcePath);
+    });
   }
   async loadSettings() {
     const loaded = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
@@ -4863,6 +4955,8 @@ var PUMLViewerPlugin = class extends import_obsidian.Plugin {
         });
       }
     }
+    loaded.headerLinkRules = Array.isArray(loaded.headerLinkRules) ? loaded.headerLinkRules.map((rule) => ({ ...rule })) : [];
+    loaded.linkModifiers = { ...DEFAULT_SETTINGS.linkModifiers, ...loaded.linkModifiers ?? {} };
     const legacyKeys = loaded;
     delete legacyKeys.methodLinkTemplate;
     delete legacyKeys.callLinkSearch;
@@ -5017,7 +5111,7 @@ var PUMLViewerPlugin = class extends import_obsidian.Plugin {
   async downloadDiagram(source, baseName = "diagram", diagramType) {
     await this.downloadDiagramAs(source, this.settings.imageFormat, baseName, diagramType);
   }
-  async renderEmbeddedDiagramBlock(source, el, fenceWidthHintPx, diagramType) {
+  async renderEmbeddedDiagramBlock(source, el, fenceWidthHintPx, diagramType, sourcePath) {
     const diagramLabel = diagramType === "mermaid" ? "Mermaid" : "PlantUML";
     const { renderSource, widthHintPx } = this.extractEmbeddedWidthHint(source, fenceWidthHintPx);
     const container = el.createDiv({ cls: "puml-embed-block" });
@@ -5209,6 +5303,7 @@ var PUMLViewerPlugin = class extends import_obsidian.Plugin {
           const svgEl = parseSvgMarkup(response.text);
           if (svgEl) {
             svgEl.addClass("puml-zoom-svg");
+            this.bindDiagramLinks(svgEl, sourcePath);
             let baseSvgWidth = 0;
             try {
               const bbox = svgEl.getBBox();
@@ -5325,6 +5420,7 @@ var PUMLViewerPlugin = class extends import_obsidian.Plugin {
         const svgEl = parseSvgMarkup(response.text);
         if (svgEl) {
           svgEl.addClass("puml-embed-svg");
+          this.bindDiagramLinks(svgEl, sourcePath);
           svgHost.appendChild(svgEl);
         } else {
           throw new Error("Response is not valid SVG content.");
@@ -5842,7 +5938,12 @@ ${error instanceof Error ? error.message : String(error)}`
         this.statusEl.setText("File is empty.");
         return;
       }
-      const renderSource = diagramType === "plantuml" ? applyLinkRules(source, this.plugin.settings.linkRules) : source;
+      const renderSource = diagramType === "plantuml" ? applyHeaderLinkRules(
+        applyLinkRules(source, this.plugin.settings.linkRules),
+        this.currentFile.path,
+        this.plugin.settings.headerLinkRules,
+        (path) => this.app.vault.getAbstractFileByPath(path) !== null
+      ) : source;
       this.statusEl.setText(`Rendering: ${this.currentFile.name}`);
       const renderRoot = this.contentHostEl.createDiv({ cls: "puml-viewer-render-root" });
       const loadingEl = renderRoot.createDiv({ cls: "puml-loading", text: "Generating diagram..." });
@@ -6029,29 +6130,12 @@ ${error instanceof Error ? error.message : String(error)}`
       if (!href) return;
       event.preventDefault();
       event.stopPropagation();
-      void this.openDiagramLink(href);
+      this.openDiagramLink(href, event);
     });
   }
-  async openDiagramLink(rawHref) {
-    const href = rawHref.trim();
-    if (/^https?:\/\//i.test(href)) {
-      window.open(href, "_blank", "noopener");
-      return;
-    }
+  openDiagramLink(rawHref, event) {
     if (!this.currentFile) return;
-    let linkpath = href;
-    try {
-      linkpath = decodeURIComponent(href);
-    } catch {
-      linkpath = href;
-    }
-    linkpath = linkpath.replace(/^\.\//, "").split("#")[0];
-    const target = this.app.metadataCache.getFirstLinkpathDest(linkpath, this.currentFile.path);
-    if (!target) {
-      new import_obsidian.Notice(`Linked file not found: ${linkpath}`);
-      return;
-    }
-    await this.app.workspace.openLinkText(target.path, this.currentFile.path, false);
+    this.plugin.openDiagramVaultLink(rawHref, event, this.currentFile.path);
   }
   bindMainViewPanning() {
     this.registerDomEvent(this.imageWrapEl, "mousedown", (event) => {
@@ -6252,6 +6336,64 @@ var PUMLViewerSettingTab = class extends import_obsidian.PluginSettingTab {
     new import_obsidian.Setting(containerEl).addButton(
       (button) => button.setButtonText("Add rule").onClick(async () => {
         this.plugin.settings.linkRules.push({ search: "", replace: "", scope: "line" });
+        await this.plugin.saveSettings();
+        this.display();
+      })
+    );
+    containerEl.createEl("h3", { text: "Link click behaviour" });
+    containerEl.createEl("p", {
+      text: "Plain click opens a link in the same tab. Hold the chosen key while clicking to open it in a new tab, a split, or a new window. Applies to every link in the viewer. Set a key to None to disable it."
+    });
+    const modifierOptions = {
+      none: "None",
+      ctrl: "Ctrl",
+      meta: "Meta (Cmd on macOS)",
+      alt: "Alt",
+      shift: "Shift"
+    };
+    const modifierSetting = (name, key) => {
+      new import_obsidian.Setting(containerEl).setName(name).addDropdown((dropdown) => {
+        for (const [value, label] of Object.entries(modifierOptions)) dropdown.addOption(value, label);
+        dropdown.setValue(this.plugin.settings.linkModifiers[key]).onChange(async (value) => {
+          this.plugin.settings.linkModifiers[key] = value;
+          await this.plugin.saveSettings();
+        });
+      });
+    };
+    modifierSetting("Key for new tab", "tab");
+    modifierSetting("Key for split view", "split");
+    modifierSetting("Key for new window", "window");
+    containerEl.createEl("h3", { text: "Header link rules" });
+    containerEl.createEl("p", {
+      text: "Adds a header with links to the open PlantUML file before rendering. The file itself is not changed. The path check is a regex on the vault path; its named groups (for example comp, prefix) fill {name} placeholders in the target path and label. A rule never links to the open file, and a link is added only if its target exists in the vault."
+    });
+    this.plugin.settings.headerLinkRules.forEach((rule, index) => {
+      new import_obsidian.Setting(containerEl).setName(`Header rule ${index + 1}`).addText(
+        (text) => text.setPlaceholder("Path check regex").setValue(rule.pathMatch).onChange(async (value) => {
+          rule.pathMatch = value;
+          await this.plugin.saveSettings();
+        })
+      ).addText(
+        (text) => text.setPlaceholder("Target path, e.g. {prefix}activity/{comp}_Run.puml").setValue(rule.targetPath).onChange(async (value) => {
+          rule.targetPath = value;
+          await this.plugin.saveSettings();
+        })
+      ).addText(
+        (text) => text.setPlaceholder("Label, e.g. {comp}_Run").setValue(rule.label).onChange(async (value) => {
+          rule.label = value;
+          await this.plugin.saveSettings();
+        })
+      ).addExtraButton(
+        (button) => button.setIcon("trash").setTooltip("Remove header rule").onClick(async () => {
+          this.plugin.settings.headerLinkRules.splice(index, 1);
+          await this.plugin.saveSettings();
+          this.display();
+        })
+      );
+    });
+    new import_obsidian.Setting(containerEl).addButton(
+      (button) => button.setButtonText("Add header rule").onClick(async () => {
+        this.plugin.settings.headerLinkRules.push({ pathMatch: "", targetPath: "", label: "" });
         await this.plugin.saveSettings();
         this.display();
       })

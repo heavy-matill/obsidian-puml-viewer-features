@@ -6139,7 +6139,7 @@ ${error instanceof Error ? error.message : String(error)}`
     this.needsCenter = false;
     const wrap = this.imageWrapEl;
     wrap.scrollLeft = Math.max(0, (wrap.scrollWidth - wrap.clientWidth) / 2);
-    wrap.scrollTop = Math.max(0, (wrap.scrollHeight - wrap.clientHeight) / 2);
+    wrap.scrollTop = 0;
   }
   bindMainViewLinks() {
     this.registerDomEvent(this.imageWrapEl, "click", (event) => {

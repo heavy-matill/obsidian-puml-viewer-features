@@ -1799,7 +1799,7 @@ class PUMLViewerView extends ItemView {
     this.needsCenter = false;
     const wrap = this.imageWrapEl;
     wrap.scrollLeft = Math.max(0, (wrap.scrollWidth - wrap.clientWidth) / 2);
-    wrap.scrollTop = Math.max(0, (wrap.scrollHeight - wrap.clientHeight) / 2);
+    wrap.scrollTop = 0;
   }
 
   private bindMainViewLinks(): void {

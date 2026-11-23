@@ -45,7 +45,6 @@ interface PUMLViewerSettings {
   linkModifiers: LinkModifierSettings;
   invertInDarkMode: boolean;
   autoRefresh: boolean;
-  lastOpenedPumlPath: string;
   embeddedDefaultView: 'diagram' | 'code';
   embeddedDiagramAlign: 'left' | 'center' | 'right';
 }
@@ -63,7 +62,6 @@ const DEFAULT_SETTINGS: PUMLViewerSettings = {
   linkModifiers: { tab: 'ctrl', split: 'shift', window: 'alt' },
   invertInDarkMode: true,
   autoRefresh: true,
-  lastOpenedPumlPath: '',
   embeddedDefaultView: 'diagram',
   embeddedDiagramAlign: 'center',
 };
@@ -305,11 +303,16 @@ const DIAGRAM_SELECTOR =
 /** Softened inversion: white becomes about #262626 and black text about #D9D9D9; hue is kept. */
 const DARK_FILTER = 'invert(0.85) hue-rotate(180deg)';
 
+/** Rules file name inside the plugin folder. */
+const RULES_FILE = 'puml-viewer-rules.json';
+
 export default class PUMLViewerPlugin extends Plugin {
   settings!: PUMLViewerSettings;
 
   async onload(): Promise<void> {
     await this.loadSettings();
+    // Migrates existing rules out of data.json into the rules file on first load.
+    await this.saveSettings();
     this.watchDiagramInsertions();
     this.applyDiagramInversion();
     this.registerEvent(this.app.workspace.on('css-change', () => this.applyDiagramInversion()));
@@ -480,6 +483,11 @@ export default class PUMLViewerPlugin extends Plugin {
         });
       }
     }
+    const rulesFile = await this.readRulesFile();
+    if (rulesFile) {
+      loaded.linkRules = rulesFile.linkRules;
+      loaded.headerLinkRules = rulesFile.headerLinkRules;
+    }
     loaded.headerLinkRules = Array.isArray(loaded.headerLinkRules)
       ? loaded.headerLinkRules.map((rule) => ({ ...rule }))
       : [];
@@ -501,7 +509,44 @@ export default class PUMLViewerPlugin extends Plugin {
   }
 
   async saveSettings(): Promise<void> {
-    await this.saveData(this.settings);
+    const stored: Partial<PUMLViewerSettings> = { ...this.settings };
+    delete stored.linkRules;
+    delete stored.headerLinkRules;
+    await this.saveData(stored);
+    await this.writeRulesFile();
+  }
+
+  /** The rules file sits in the plugin folder, next to main.js. Commit it; data.json stays local. */
+  private rulesPath(): string {
+    return normalizePath(`${this.manifest.dir ?? '.obsidian/plugins/puml-viewer'}/${RULES_FILE}`);
+  }
+
+  private async readRulesFile(): Promise<{ linkRules: LinkRule[]; headerLinkRules: HeaderLinkRule[] } | null> {
+    const adapter = this.app.vault.adapter;
+    const path = this.rulesPath();
+    if (!(await adapter.exists(path))) return null;
+    try {
+      const parsed = JSON.parse(await adapter.read(path)) as Partial<{
+        linkRules: LinkRule[];
+        headerLinkRules: HeaderLinkRule[];
+      }>;
+      return {
+        linkRules: Array.isArray(parsed.linkRules) ? parsed.linkRules : [],
+        headerLinkRules: Array.isArray(parsed.headerLinkRules) ? parsed.headerLinkRules : [],
+      };
+    } catch {
+      new Notice(`Could not read ${path}. Rules were not loaded.`);
+      return null;
+    }
+  }
+
+  private async writeRulesFile(): Promise<void> {
+    const text = JSON.stringify(
+      { linkRules: this.settings.linkRules, headerLinkRules: this.settings.headerLinkRules },
+      null,
+      2,
+    );
+    await this.app.vault.adapter.write(this.rulesPath(), `${text}\n`);
   }
 
   rerenderMarkdownPreviews(): void {
@@ -512,12 +557,6 @@ export default class PUMLViewerPlugin extends Plugin {
         view.previewMode.rerender(true);
       }
     }
-  }
-
-  async rememberLastPuml(path: string): Promise<void> {
-    if (!path || this.settings.lastOpenedPumlPath === path) return;
-    this.settings.lastOpenedPumlPath = path;
-    await this.saveSettings();
   }
 
   async activatePUMLView(file: TFile): Promise<void> {
@@ -1311,7 +1350,6 @@ class PUMLViewerView extends ItemView {
       // A change of file is a navigation step; Obsidian records it for the tab's back and forward arrows.
       if (this.currentFile?.path !== file.path) result.history = true;
       this.currentFile = file;
-      void this.plugin.rememberLastPuml(file.path);
       this.resetDraftIfFileChanged();
       this.updateToolbarState();
       await this.renderActiveMode();
@@ -1336,10 +1374,6 @@ class PUMLViewerView extends ItemView {
     const activeFile = this.app.workspace.getActiveFile();
     if (activeFile && getDiagramTypeByExtension(activeFile.extension)) candidates.push(activeFile.path);
 
-    if (this.plugin.settings.lastOpenedPumlPath) {
-      candidates.push(this.plugin.settings.lastOpenedPumlPath);
-    }
-
     const workspaceAny = this.app.workspace as unknown as { getLastOpenFiles?: () => string[] };
     const lastOpenFiles = workspaceAny.getLastOpenFiles?.() ?? [];
     for (const path of lastOpenFiles) {
@@ -1353,7 +1387,6 @@ class PUMLViewerView extends ItemView {
       const file = this.app.vault.getAbstractFileByPath(path);
       if (file instanceof TFile && getDiagramTypeByExtension(file.extension)) {
         this.currentFile = file;
-        void this.plugin.rememberLastPuml(file.path);
         this.resetDraftIfFileChanged();
         this.updateToolbarState();
         await this.renderActiveMode();

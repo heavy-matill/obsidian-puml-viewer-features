@@ -4718,7 +4718,6 @@ var DEFAULT_SETTINGS = {
   linkModifiers: { tab: "ctrl", split: "shift", window: "alt" },
   invertInDarkMode: true,
   autoRefresh: true,
-  lastOpenedPumlPath: "",
   embeddedDefaultView: "diagram",
   embeddedDiagramAlign: "center"
 };
@@ -4880,6 +4879,7 @@ function parseSvgMarkup(svgMarkup) {
 }
 var DIAGRAM_SELECTOR = ".puml-viewer-render-root svg, .puml-viewer-render-root img, .puml-embed-diagram svg, .puml-embed-diagram img, .puml-zoom-svg, .puml-zoom-image";
 var DARK_FILTER = "invert(0.85) hue-rotate(180deg)";
+var RULES_FILE = "puml-viewer-rules.json";
 var PUMLViewerPlugin = class extends import_obsidian.Plugin {
   constructor() {
     super(...arguments);
@@ -4887,6 +4887,7 @@ var PUMLViewerPlugin = class extends import_obsidian.Plugin {
   }
   async onload() {
     await this.loadSettings();
+    await this.saveSettings();
     this.watchDiagramInsertions();
     this.applyDiagramInversion();
     this.registerEvent(this.app.workspace.on("css-change", () => this.applyDiagramInversion()));
@@ -5020,6 +5021,11 @@ var PUMLViewerPlugin = class extends import_obsidian.Plugin {
         });
       }
     }
+    const rulesFile = await this.readRulesFile();
+    if (rulesFile) {
+      loaded.linkRules = rulesFile.linkRules;
+      loaded.headerLinkRules = rulesFile.headerLinkRules;
+    }
     loaded.headerLinkRules = Array.isArray(loaded.headerLinkRules) ? loaded.headerLinkRules.map((rule) => ({ ...rule })) : [];
     loaded.linkModifiers = { ...DEFAULT_SETTINGS.linkModifiers, ...loaded.linkModifiers ?? {} };
     const legacyKeys = loaded;
@@ -5038,7 +5044,39 @@ var PUMLViewerPlugin = class extends import_obsidian.Plugin {
     this.settings = loaded;
   }
   async saveSettings() {
-    await this.saveData(this.settings);
+    const stored = { ...this.settings };
+    delete stored.linkRules;
+    delete stored.headerLinkRules;
+    await this.saveData(stored);
+    await this.writeRulesFile();
+  }
+  /** The rules file sits in the plugin folder, next to main.js. Commit it; data.json stays local. */
+  rulesPath() {
+    return (0, import_obsidian.normalizePath)(`${this.manifest.dir ?? ".obsidian/plugins/puml-viewer"}/${RULES_FILE}`);
+  }
+  async readRulesFile() {
+    const adapter = this.app.vault.adapter;
+    const path = this.rulesPath();
+    if (!await adapter.exists(path)) return null;
+    try {
+      const parsed = JSON.parse(await adapter.read(path));
+      return {
+        linkRules: Array.isArray(parsed.linkRules) ? parsed.linkRules : [],
+        headerLinkRules: Array.isArray(parsed.headerLinkRules) ? parsed.headerLinkRules : []
+      };
+    } catch {
+      new import_obsidian.Notice(`Could not read ${path}. Rules were not loaded.`);
+      return null;
+    }
+  }
+  async writeRulesFile() {
+    const text = JSON.stringify(
+      { linkRules: this.settings.linkRules, headerLinkRules: this.settings.headerLinkRules },
+      null,
+      2
+    );
+    await this.app.vault.adapter.write(this.rulesPath(), `${text}
+`);
   }
   rerenderMarkdownPreviews() {
     const leaves = this.app.workspace.getLeavesOfType("markdown");
@@ -5048,11 +5086,6 @@ var PUMLViewerPlugin = class extends import_obsidian.Plugin {
         view.previewMode.rerender(true);
       }
     }
-  }
-  async rememberLastPuml(path) {
-    if (!path || this.settings.lastOpenedPumlPath === path) return;
-    this.settings.lastOpenedPumlPath = path;
-    await this.saveSettings();
   }
   async activatePUMLView(file) {
     const leaf = this.app.workspace.getMostRecentLeaf() ?? this.app.workspace.getLeaf(true);
@@ -5713,7 +5746,6 @@ var PUMLViewerView = class extends import_obsidian.ItemView {
     if (file instanceof import_obsidian.TFile) {
       if (this.currentFile?.path !== file.path) result.history = true;
       this.currentFile = file;
-      void this.plugin.rememberLastPuml(file.path);
       this.resetDraftIfFileChanged();
       this.updateToolbarState();
       await this.renderActiveMode();
@@ -5733,9 +5765,6 @@ var PUMLViewerView = class extends import_obsidian.ItemView {
     if (typeof state?.file === "string") candidates.push(state.file);
     const activeFile = this.app.workspace.getActiveFile();
     if (activeFile && getDiagramTypeByExtension(activeFile.extension)) candidates.push(activeFile.path);
-    if (this.plugin.settings.lastOpenedPumlPath) {
-      candidates.push(this.plugin.settings.lastOpenedPumlPath);
-    }
     const workspaceAny = this.app.workspace;
     const lastOpenFiles = workspaceAny.getLastOpenFiles?.() ?? [];
     for (const path of lastOpenFiles) {
@@ -5748,7 +5777,6 @@ var PUMLViewerView = class extends import_obsidian.ItemView {
       const file = this.app.vault.getAbstractFileByPath(path);
       if (file instanceof import_obsidian.TFile && getDiagramTypeByExtension(file.extension)) {
         this.currentFile = file;
-        void this.plugin.rememberLastPuml(file.path);
         this.resetDraftIfFileChanged();
         this.updateToolbarState();
         await this.renderActiveMode();

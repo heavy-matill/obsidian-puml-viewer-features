@@ -1,9 +1,9 @@
 {
   "id": "puml-viewer",
-  "name": "PUML Viewer",
-  "version": "0.2.17",
+  "name": "CodeFlow PUML Viewer",
+  "version": "0.2.17.CodeFlow",
   "minAppVersion": "1.5.0",
-  "description": "Renders PlantUML/Mermaid from diagram files and markdown code blocks.",
-  "author": "Andrei Kolygin",
+  "description": "CodeFlow edition of the official PUML Viewer by Andrei Kolygin, with added CodeFlow features: header link rules, link modifiers, and navigation.",
+  "author": "Andrei Kolygin & CodeFlow Team",
   "isDesktopOnly": false
 }

@@ -2080,6 +2080,8 @@ class PUMLViewerSettingTab extends PluginSettingTab {
           }),
       );
 
+    new Setting(containerEl).setName('CodeFlow specific settings').setHeading();
+
     new Setting(containerEl)
       .setName('Auto zoom to 100%')
       .setDesc('Open each diagram at 100% and centred. When off, diagrams fit to the pane width.')
@@ -2088,6 +2090,74 @@ class PUMLViewerSettingTab extends PluginSettingTab {
           this.plugin.settings.autoZoom100 = value;
           await this.plugin.saveSettings();
         }),
+      );
+
+    containerEl.createEl('h3', { text: 'Link click behaviour' });
+    containerEl.createEl('p', {
+      text: 'Plain click opens a link in the same tab. Hold the chosen key while clicking to open it in a new tab, a split, or a new window. Applies to every link in the viewer. Set a key to None to disable it.',
+    });
+    const modifierOptions: Record<ModifierKey, string> = {
+      none: 'None',
+      ctrl: 'Ctrl',
+      meta: 'Meta (Cmd on macOS)',
+      alt: 'Alt',
+      shift: 'Shift',
+    };
+    const modifierSetting = (name: string, key: 'tab' | 'split' | 'window'): void => {
+      new Setting(containerEl)
+        .setName(name)
+        .addDropdown((dropdown) => {
+          for (const [value, label] of Object.entries(modifierOptions)) dropdown.addOption(value, label);
+          dropdown.setValue(this.plugin.settings.linkModifiers[key]).onChange(async (value) => {
+            this.plugin.settings.linkModifiers[key] = value as ModifierKey;
+            await this.plugin.saveSettings();
+          });
+        });
+    };
+    modifierSetting('Key for new tab', 'tab');
+    modifierSetting('Key for split view', 'split');
+    modifierSetting('Key for new window', 'window');
+
+    new Setting(containerEl)
+      .setName('Auto refresh')
+      .setDesc('Automatically re-render diagram when the source file changes.')
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.autoRefresh).onChange(async (value) => {
+          this.plugin.settings.autoRefresh = value;
+          await this.plugin.saveSettings();
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName('Embedded block default view')
+      .setDesc('Choose what to show first in embedded diagram blocks.')
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption('diagram', 'Diagram')
+          .addOption('code', 'Code')
+          .setValue(this.plugin.settings.embeddedDefaultView)
+          .onChange(async (value) => {
+            if (value !== 'diagram' && value !== 'code') return;
+            this.plugin.settings.embeddedDefaultView = value;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName('Embedded diagram alignment')
+      .setDesc('Default alignment for diagrams in embedded diagram blocks.')
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption('left', 'Left')
+          .addOption('center', 'Center')
+          .addOption('right', 'Right')
+          .setValue(this.plugin.settings.embeddedDiagramAlign)
+          .onChange(async (value) => {
+            if (value !== 'left' && value !== 'center' && value !== 'right') return;
+            this.plugin.settings.embeddedDiagramAlign = value;
+            await this.plugin.saveSettings();
+            this.plugin.rerenderMarkdownPreviews();
+          }),
       );
 
     containerEl.createEl('h3', { text: 'Link rules' });
@@ -2146,32 +2216,6 @@ class PUMLViewerSettingTab extends PluginSettingTab {
       }),
     );
 
-    containerEl.createEl('h3', { text: 'Link click behaviour' });
-    containerEl.createEl('p', {
-      text: 'Plain click opens a link in the same tab. Hold the chosen key while clicking to open it in a new tab, a split, or a new window. Applies to every link in the viewer. Set a key to None to disable it.',
-    });
-    const modifierOptions: Record<ModifierKey, string> = {
-      none: 'None',
-      ctrl: 'Ctrl',
-      meta: 'Meta (Cmd on macOS)',
-      alt: 'Alt',
-      shift: 'Shift',
-    };
-    const modifierSetting = (name: string, key: 'tab' | 'split' | 'window'): void => {
-      new Setting(containerEl)
-        .setName(name)
-        .addDropdown((dropdown) => {
-          for (const [value, label] of Object.entries(modifierOptions)) dropdown.addOption(value, label);
-          dropdown.setValue(this.plugin.settings.linkModifiers[key]).onChange(async (value) => {
-            this.plugin.settings.linkModifiers[key] = value as ModifierKey;
-            await this.plugin.saveSettings();
-          });
-        });
-    };
-    modifierSetting('Key for new tab', 'tab');
-    modifierSetting('Key for split view', 'split');
-    modifierSetting('Key for new window', 'window');
-
     containerEl.createEl('h3', { text: 'Header link rules' });
     containerEl.createEl('p', {
       text: 'Adds a header with links to the open PlantUML file before rendering. The file itself is not changed. The path check is a regex on the vault path; its named groups (for example comp, prefix) fill {name} placeholders in the target path and label. A rule never links to the open file, and a link is added only if its target exists in the vault.',
@@ -2226,47 +2270,5 @@ class PUMLViewerSettingTab extends PluginSettingTab {
         this.display();
       }),
     );
-
-    new Setting(containerEl)
-      .setName('Auto refresh')
-      .setDesc('Automatically re-render diagram when the source file changes.')
-      .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.autoRefresh).onChange(async (value) => {
-          this.plugin.settings.autoRefresh = value;
-          await this.plugin.saveSettings();
-        }),
-      );
-
-    new Setting(containerEl)
-      .setName('Embedded block default view')
-      .setDesc('Choose what to show first in embedded diagram blocks.')
-      .addDropdown((dropdown) =>
-        dropdown
-          .addOption('diagram', 'Diagram')
-          .addOption('code', 'Code')
-          .setValue(this.plugin.settings.embeddedDefaultView)
-          .onChange(async (value) => {
-            if (value !== 'diagram' && value !== 'code') return;
-            this.plugin.settings.embeddedDefaultView = value;
-            await this.plugin.saveSettings();
-          }),
-      );
-
-    new Setting(containerEl)
-      .setName('Embedded diagram alignment')
-      .setDesc('Default alignment for diagrams in embedded diagram blocks.')
-      .addDropdown((dropdown) =>
-        dropdown
-          .addOption('left', 'Left')
-          .addOption('center', 'Center')
-          .addOption('right', 'Right')
-          .setValue(this.plugin.settings.embeddedDiagramAlign)
-          .onChange(async (value) => {
-            if (value !== 'left' && value !== 'center' && value !== 'right') return;
-            this.plugin.settings.embeddedDiagramAlign = value;
-            await this.plugin.saveSettings();
-            this.plugin.rerenderMarkdownPreviews();
-          }),
-      );
   }
 }

@@ -191,6 +191,29 @@ function fillTemplate(template: string, groups: Record<string, string>): string 
   return template.replace(/\{(\w+)\}/g, (_full, key: string) => groups[key] ?? '');
 }
 
+/** Path from the folder of fromFile to toFile, both vault paths, e.g. ../ChrgFstCtl_classes.puml. */
+function relativeVaultPath(fromFile: string, toFile: string): string {
+  const fromDir = fromFile.split('/').slice(0, -1);
+  const toParts = toFile.split('/');
+  let common = 0;
+  while (common < fromDir.length && common < toParts.length - 1 && fromDir[common] === toParts[common]) {
+    common++;
+  }
+  const ups = fromDir.length - common;
+  return [...Array<string>(ups).fill('..'), ...toParts.slice(common)].join('/');
+}
+
+/** Resolves a link path against the folder of sourcePath, normalising . and .. segments. */
+function resolveVaultPath(linkpath: string, sourcePath: string): string {
+  const parts = sourcePath.split('/').slice(0, -1);
+  for (const part of linkpath.split('/')) {
+    if (part === '' || part === '.') continue;
+    if (part === '..') parts.pop();
+    else parts.push(part);
+  }
+  return parts.join('/');
+}
+
 /**
  * Adds a header block with one link per matching rule, placed after @startuml.
  * pathMatch is tested against the vault path of the open file. Its named groups fill
@@ -226,7 +249,7 @@ function applyHeaderLinkRules(
     if (!exists(target)) continue;
     seen.add(target);
     const label = fillTemplate(rule.label, groups).replace(/[[\]]/g, '').trim() || target;
-    links.push(`[[${encodeURI(target)} ${label}]]`);
+    links.push(`[[${encodeURI(relativeVaultPath(filePath, target))} ${label}]]`);
   }
   if (links.length === 0) return source;
   const lines = source.split('\n');
@@ -339,13 +362,16 @@ export default class PUMLViewerPlugin extends Plugin {
       linkpath = href;
     }
     linkpath = linkpath.replace(/^\.\//, '').split('#')[0];
-    const target = this.app.metadataCache.getFirstLinkpathDest(linkpath, sourcePath);
+    const target =
+      this.app.metadataCache.getFirstLinkpathDest(resolveVaultPath(linkpath, sourcePath), '') ??
+      this.app.metadataCache.getFirstLinkpathDest(linkpath, sourcePath);
     if (!target) {
       new Notice(`Linked file not found: ${linkpath}`);
       return;
     }
     const mode = linkOpenMode(event, this.settings.linkModifiers);
-    void this.app.workspace.openLinkText(target.path, sourcePath, mode === 'same' ? false : mode);
+    const leaf = this.app.workspace.getLeaf(mode === 'same' ? false : mode);
+    void leaf.openFile(target);
   }
 
   /** Routes every link inside a rendered SVG through openDiagramVaultLink. */

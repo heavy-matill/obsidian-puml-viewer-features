@@ -4796,6 +4796,25 @@ function applyLinkRule(source, rule) {
 function fillTemplate(template, groups) {
   return template.replace(/\{(\w+)\}/g, (_full, key) => groups[key] ?? "");
 }
+function relativeVaultPath(fromFile, toFile) {
+  const fromDir = fromFile.split("/").slice(0, -1);
+  const toParts = toFile.split("/");
+  let common = 0;
+  while (common < fromDir.length && common < toParts.length - 1 && fromDir[common] === toParts[common]) {
+    common++;
+  }
+  const ups = fromDir.length - common;
+  return [...Array(ups).fill(".."), ...toParts.slice(common)].join("/");
+}
+function resolveVaultPath(linkpath, sourcePath) {
+  const parts = sourcePath.split("/").slice(0, -1);
+  for (const part of linkpath.split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") parts.pop();
+    else parts.push(part);
+  }
+  return parts.join("/");
+}
 function applyHeaderLinkRules(source, filePath, rules, exists) {
   const fileName = filePath.split("/").pop() ?? filePath;
   const stem = fileName.replace(/\.[^.]+$/, "");
@@ -4818,7 +4837,7 @@ function applyHeaderLinkRules(source, filePath, rules, exists) {
     if (!exists(target)) continue;
     seen.add(target);
     const label = fillTemplate(rule.label, groups).replace(/[[\]]/g, "").trim() || target;
-    links.push(`[[${encodeURI(target)} ${label}]]`);
+    links.push(`[[${encodeURI(relativeVaultPath(filePath, target))} ${label}]]`);
   }
   if (links.length === 0) return source;
   const lines = source.split("\n");
@@ -4911,13 +4930,14 @@ var PUMLViewerPlugin = class extends import_obsidian.Plugin {
       linkpath = href;
     }
     linkpath = linkpath.replace(/^\.\//, "").split("#")[0];
-    const target = this.app.metadataCache.getFirstLinkpathDest(linkpath, sourcePath);
+    const target = this.app.metadataCache.getFirstLinkpathDest(resolveVaultPath(linkpath, sourcePath), "") ?? this.app.metadataCache.getFirstLinkpathDest(linkpath, sourcePath);
     if (!target) {
       new import_obsidian.Notice(`Linked file not found: ${linkpath}`);
       return;
     }
     const mode = linkOpenMode(event, this.settings.linkModifiers);
-    void this.app.workspace.openLinkText(target.path, sourcePath, mode === "same" ? false : mode);
+    const leaf = this.app.workspace.getLeaf(mode === "same" ? false : mode);
+    void leaf.openFile(target);
   }
   /** Routes every link inside a rendered SVG through openDiagramVaultLink. */
   bindDiagramLinks(svgEl, sourcePath) {
